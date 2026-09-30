@@ -1,4 +1,4 @@
-```python
+
 import os
 import json
 import requests
@@ -221,4 +221,4 @@ elif page=="Model Evaluation":
             st.error(f"Could not read the CSV file: {e}")
     else:
         st.info("No evaluation file uploaded. This page will display metrics only when you provide test results.")
-```
+
