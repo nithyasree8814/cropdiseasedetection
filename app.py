@@ -1,201 +1,224 @@
-
+```python
+import os
+import json
+import requests
 import streamlit as st
 import tensorflow as tf
 import numpy as np
-import cv2
-import json
 import pandas as pd
-import os
+import cv2
 import matplotlib.pyplot as plt
 from PIL import Image
 
 st.set_page_config(page_title="Crop Disease AI",page_icon="🌿",layout="wide")
 
-MODEL_PATHS={
-    "MobileNetV2":"models/mobilenetv2.keras",
-    "ResNet50":"models/resnet50.keras",
-    "Custom CNN":"models/custom_cnn.keras"
-}
-
-CLASS_NAMES_PATH="models/class_names.json"
+MODEL_PATH="best_mnv2_v2.keras"
+MODEL_URL="https://huggingface.co/ashikaasriarun/MobileNet-V2-NewPlantDisease/resolve/main/best_mnv2_v2.keras"
+IMAGE_SIZE=160
+CLASS_NAMES=[
+"Apple___Apple_scab",
+"Apple___Black_rot",
+"Apple___Cedar_apple_rust",
+"Apple___healthy",
+"Blueberry___healthy",
+"Cherry_(including_sour)___Powdery_mildew",
+"Cherry_(including_sour)___healthy",
+"Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot",
+"Corn_(maize)___Common_rust_",
+"Corn_(maize)___Northern_Leaf_Blight",
+"Corn_(maize)___healthy",
+"Grape___Black_rot",
+"Grape___Esca_(Black_Measles)",
+"Grape___Leaf_blight_(Isariopsis_Leaf_Spot)",
+"Grape___healthy",
+"Orange___Haunglongbing_(Citrus_greening)",
+"Peach___Bacterial_spot",
+"Peach___healthy",
+"Pepper,_bell___Bacterial_spot",
+"Pepper,_bell___healthy",
+"Potato___Early_blight",
+"Potato___Late_blight",
+"Potato___healthy",
+"Raspberry___healthy",
+"Soybean___healthy",
+"Squash___Powdery_mildew",
+"Strawberry___Leaf_scorch",
+"Strawberry___healthy",
+"Tomato___Bacterial_spot",
+"Tomato___Early_blight",
+"Tomato___Late_blight",
+"Tomato___Leaf_Mold",
+"Tomato___Septoria_leaf_spot",
+"Tomato___Spider_mites Two-spotted_spider_mite",
+"Tomato___Target_Spot",
+"Tomato___Tomato_Yellow_Leaf_Curl_Virus",
+"Tomato___Tomato_mosaic_virus",
+"Tomato___healthy"
+]
 
 @st.cache_resource
-def load_model(model_path):
-    return tf.keras.models.load_model(model_path)
-
-@st.cache_data
-def load_class_names():
-    if os.path.exists(CLASS_NAMES_PATH):
-        with open(CLASS_NAMES_PATH,"r") as f:
-            names=json.load(f)
-        if isinstance(names,dict):
-            return [names[str(i)] for i in sorted(map(int,names.keys()))]
-        return names
-    return []
+def load_model():
+    if not os.path.exists(MODEL_PATH):
+        with st.spinner("Downloading the pretrained model. Please wait..."):
+            response=requests.get(MODEL_URL,stream=True,timeout=300)
+            response.raise_for_status()
+            with open(MODEL_PATH,"wb") as file:
+                for chunk in response.iter_content(chunk_size=1024*1024):
+                    if chunk:
+                        file.write(chunk)
+    return tf.keras.models.load_model(MODEL_PATH,compile=False)
 
 def preprocess_image(image):
-    image=image.convert("RGB").resize((224,224))
-    image_array=np.array(image,dtype=np.float32)
-    return np.expand_dims(image_array,axis=0)
+    image=image.convert("RGB").resize((IMAGE_SIZE,IMAGE_SIZE))
+    array=np.array(image,dtype=np.float32)
+    return np.expand_dims(array,axis=0)
 
-def predict_disease(model,image,class_names):
-    processed=preprocess_image(image)
-    predictions=model.predict(processed,verbose=0)[0]
-    predictions=np.asarray(predictions).flatten()
+def predict_disease(model,image):
+    array=preprocess_image(image)
+    predictions=np.asarray(model.predict(array,verbose=0)[0]).flatten()
+    if len(predictions)!=len(CLASS_NAMES):
+        raise ValueError(f"Model returned {len(predictions)} predictions, but {len(CLASS_NAMES)} class names are configured.")
     if np.any(predictions<0) or not np.isclose(np.sum(predictions),1,atol=0.05):
         predictions=tf.nn.softmax(predictions).numpy()
-    top_indices=np.argsort(predictions)[::-1][:3]
-    results=[]
-    for index in top_indices:
-        name=class_names[index] if index<len(class_names) else f"Class {index}"
-        results.append((name,float(predictions[index])*100))
-    return results
+    indices=np.argsort(predictions)[::-1][:3]
+    return [(CLASS_NAMES[i].replace("___"," - ").replace("_"," ").strip(),float(predictions[i])*100) for i in indices]
 
 def estimate_severity(image):
-    image_array=np.array(image.convert("RGB").resize((224,224)))
-    hsv=cv2.cvtColor(image_array,cv2.COLOR_RGB2HSV)
-    green_mask=cv2.inRange(hsv,np.array([25,35,25]),np.array([95,255,255]))
-    leaf_pixels=np.count_nonzero(green_mask)
+    array=np.array(image.convert("RGB").resize((224,224)))
+    hsv=cv2.cvtColor(array,cv2.COLOR_RGB2HSV)
+    green=cv2.inRange(hsv,np.array([25,35,25]),np.array([95,255,255]))
+    yellow=cv2.inRange(hsv,np.array([10,40,40]),np.array([35,255,255]))
+    brown=cv2.inRange(hsv,np.array([0,40,20]),np.array([25,255,200]))
+    leaf_pixels=np.count_nonzero(green|yellow|brown)
     if leaf_pixels==0:
-        return 0.0,None
-    yellow_mask=cv2.inRange(hsv,np.array([10,40,40]),np.array([35,255,255]))
-    brown_mask=cv2.inRange(hsv,np.array([0,40,20]),np.array([25,255,200]))
-    affected=cv2.bitwise_or(yellow_mask,brown_mask)
-    affected=cv2.bitwise_and(affected,cv2.bitwise_not(green_mask))
+        return 0,None
+    affected=cv2.bitwise_or(yellow,brown)
+    affected=cv2.bitwise_and(affected,cv2.bitwise_not(green))
     affected_pixels=np.count_nonzero(affected)
-    severity=min(100,(affected_pixels/leaf_pixels)*100)
+    severity=min(100,affected_pixels/leaf_pixels*100)
     return severity,affected
 
-def find_last_conv_layer(model):
+def find_conv_layer(model):
     for layer in reversed(model.layers):
         if isinstance(layer,tf.keras.layers.Conv2D):
-            return layer.name
+            return layer
+        if isinstance(layer,tf.keras.Model):
+            found=find_conv_layer(layer)
+            if found:
+                return found
     return None
 
 def make_gradcam(model,image):
-    layer_name=find_last_conv_layer(model)
-    if layer_name is None:
-        raise ValueError("No directly accessible Conv2D layer was found.")
-    grad_model=tf.keras.models.Model(
-        inputs=model.inputs,
-        outputs=[model.get_layer(layer_name).output,model.output]
-    )
-    image_array=preprocess_image(image)
-    with tf.GradientTape() as tape:
-        conv_outputs,predictions=grad_model(image_array,training=False)
-        class_index=tf.argmax(predictions[0])
-        loss=predictions[:,class_index]
-    gradients=tape.gradient(loss,conv_outputs)
-    if gradients is None:
-        raise ValueError("Grad-CAM could not calculate gradients for this model.")
-    pooled_gradients=tf.reduce_mean(gradients,axis=(0,1,2))
-    conv_outputs=conv_outputs[0]
-    heatmap=tf.reduce_sum(conv_outputs*pooled_gradients,axis=-1)
-    heatmap=tf.maximum(heatmap,0)
-    maximum=tf.reduce_max(heatmap)
-    heatmap=heatmap/(maximum+tf.keras.backend.epsilon())
-    heatmap=cv2.resize(heatmap.numpy(),(224,224))
-    original=np.array(image.convert("RGB").resize((224,224)))
-    heatmap=np.uint8(255*heatmap)
-    colored=cv2.applyColorMap(heatmap,cv2.COLORMAP_JET)
-    colored=cv2.cvtColor(colored,cv2.COLOR_BGR2RGB)
-    overlay=cv2.addWeighted(original,0.6,colored,0.4,0)
-    return overlay
+    conv_layer=find_conv_layer(model)
+    if conv_layer is None:
+        raise ValueError("No convolutional layer was found.")
+    try:
+        grad_model=tf.keras.Model(model.inputs,[conv_layer.output,model.output])
+        input_array=preprocess_image(image)
+        with tf.GradientTape() as tape:
+            conv_outputs,predictions=grad_model(input_array,training=False)
+            class_index=tf.argmax(predictions[0])
+            loss=predictions[:,class_index]
+        gradients=tape.gradient(loss,conv_outputs)
+        if gradients is None:
+            raise ValueError("Gradients could not be calculated for this model.")
+        weights=tf.reduce_mean(gradients,axis=(0,1,2))
+        heatmap=tf.reduce_sum(conv_outputs[0]*weights,axis=-1)
+        heatmap=tf.maximum(heatmap,0)
+        heatmap=heatmap/(tf.reduce_max(heatmap)+tf.keras.backend.epsilon())
+        heatmap=cv2.resize(heatmap.numpy(),(224,224))
+        heatmap=np.uint8(255*heatmap)
+        colored=cv2.applyColorMap(heatmap,cv2.COLORMAP_JET)
+        colored=cv2.cvtColor(colored,cv2.COLOR_BGR2RGB)
+        original=np.array(image.convert("RGB").resize((224,224)))
+        return cv2.addWeighted(original,0.6,colored,0.4,0)
+    except Exception as e:
+        raise ValueError(f"Grad-CAM is not supported for this model structure: {e}")
+
+def display_results(results):
+    st.subheader("Prediction Results")
+    st.metric("Predicted Disease",results[0][0])
+    st.metric("Confidence",f"{results[0][1]:.2f}%")
+    df=pd.DataFrame(results,columns=["Disease","Confidence (%)"])
+    st.subheader("Top 3 Predictions")
+    st.dataframe(df,use_container_width=True,hide_index=True)
+    st.bar_chart(df.set_index("Disease"))
 
 st.sidebar.title("🌿 Crop Disease AI")
 page=st.sidebar.radio("Navigation",["Home","Disease Detection","Explainable AI","Model Evaluation"])
-st.sidebar.markdown("---")
-model_name=st.sidebar.selectbox("Select Model",list(MODEL_PATHS.keys()))
-model_path=MODEL_PATHS[model_name]
 
 if page=="Home":
     st.title("🌿 AI-Based Crop Disease Detection")
-    st.write("An image-based crop disease detection system using deep learning.")
+    st.write("Detect plant diseases from leaf images using a pretrained MobileNetV2 deep learning model.")
     st.subheader("Project Features")
     col1,col2=st.columns(2)
     with col1:
-        st.info("📷 Upload a crop leaf image")
-        st.info("🧠 Predict disease using a trained model")
+        st.info("📷 Leaf image upload")
+        st.info("🧠 Deep learning disease prediction")
+        st.info("📊 Top-3 prediction results")
     with col2:
-        st.info("🔍 View model predictions")
-        st.info("🔥 Visualize model attention using Grad-CAM")
-    st.warning("The application requires trained model files and a class_names.json file in the models folder.")
+        st.info("🔥 Grad-CAM visualization when supported")
+        st.info("🌱 Estimated leaf damage")
+        st.info("📈 Model evaluation dashboard")
+    st.warning("The model is trained on the PlantVillage dataset. Predictions on real-world images may be less accurate.")
 
 elif page=="Disease Detection":
     st.title("🔬 Crop Disease Detection")
-    st.write(f"Selected model: **{model_name}**")
-    uploaded_file=st.file_uploader("Upload a leaf image",type=["jpg","jpeg","png"])
-    if uploaded_file:
-        image=Image.open(uploaded_file).convert("RGB")
+    uploaded=st.file_uploader("Upload a plant leaf image",type=["jpg","jpeg","png"])
+    if uploaded:
+        image=Image.open(uploaded).convert("RGB")
         st.image(image,caption="Uploaded Leaf Image",use_container_width=True)
         if st.button("Detect Disease",type="primary"):
-            if not os.path.exists(model_path):
-                st.error(f"Model file not found: {model_path}")
-            else:
-                try:
-                    with st.spinner("Analyzing image..."):
-                        model=load_model(model_path)
-                        class_names=load_class_names()
-                        results=predict_disease(model,image,class_names)
-                        severity,mask=estimate_severity(image)
-                    st.session_state["image"]=image
-                    st.session_state["results"]=results
-                    st.session_state["severity"]=severity
-                    st.session_state["model_name"]=model_name
-                    st.success("Prediction completed!")
-                except Exception as e:
-                    st.error(f"Prediction failed: {e}")
+            try:
+                model=load_model()
+                with st.spinner("Analyzing leaf image..."):
+                    results=predict_disease(model,image)
+                    severity,mask=estimate_severity(image)
+                st.session_state["results"]=results
+                st.session_state["severity"]=severity
+                st.session_state["image"]=image
+                st.success("Prediction completed!")
+            except Exception as e:
+                st.error(f"Prediction failed: {e}")
     if "results" in st.session_state:
-        st.subheader("Prediction Results")
-        results=st.session_state["results"]
-        st.metric("Predicted Disease",results[0][0])
-        st.metric("Prediction Confidence",f"{results[0][1]:.2f}%")
-        st.subheader("Top 3 Predictions")
-        result_df=pd.DataFrame(results,columns=["Disease","Confidence (%)"])
-        st.dataframe(result_df,use_container_width=True,hide_index=True)
-        st.bar_chart(result_df.set_index("Disease"))
+        display_results(st.session_state["results"])
         severity=st.session_state["severity"]
         st.subheader("Estimated Leaf Damage")
         st.metric("Estimated Affected Area",f"{severity:.2f}%")
         st.progress(int(severity))
-        st.caption("This is a color-based estimate, not a validated disease-severity measurement.")
+        st.caption("This is a rough color-based estimate, not a validated disease-severity measurement.")
 
 elif page=="Explainable AI":
     st.title("🔥 Explainable AI - Grad-CAM")
-    st.write("Grad-CAM highlights image regions that influence the model's prediction.")
-    uploaded_file=st.file_uploader("Upload a leaf image for Grad-CAM",type=["jpg","jpeg","png"],key="gradcam_upload")
-    if uploaded_file:
-        image=Image.open(uploaded_file).convert("RGB")
+    st.write("Grad-CAM highlights image regions that may have influenced the model's prediction.")
+    uploaded=st.file_uploader("Upload a leaf image",type=["jpg","jpeg","png"],key="gradcam_image")
+    if uploaded:
+        image=Image.open(uploaded).convert("RGB")
         st.image(image,caption="Input Image",use_container_width=True)
         if st.button("Generate Grad-CAM",type="primary"):
-            if not os.path.exists(model_path):
-                st.error(f"Model file not found: {model_path}")
-            else:
-                try:
-                    with st.spinner("Generating Grad-CAM..."):
-                        model=load_model(model_path)
-                        overlay=make_gradcam(model,image)
-                    st.image(overlay,caption="Grad-CAM Visualization",use_container_width=True)
-                except Exception as e:
-                    st.error(f"Grad-CAM generation failed: {e}")
-                    st.info("This implementation requires a model with a directly accessible Conv2D layer connected to its output.")
+            try:
+                model=load_model()
+                with st.spinner("Generating visualization..."):
+                    overlay=make_gradcam(model,image)
+                st.image(overlay,caption="Grad-CAM Heatmap",use_container_width=True)
+            except Exception as e:
+                st.error(str(e))
 
 elif page=="Model Evaluation":
     st.title("📊 Model Evaluation")
-    st.write(f"Selected model: **{model_name}**")
-    evaluation_path="evaluation.csv"
-    if os.path.exists(evaluation_path):
+    st.write("Upload a CSV file containing evaluation metrics calculated on a test dataset.")
+    uploaded=st.file_uploader("Upload evaluation.csv",type=["csv"])
+    if uploaded:
         try:
-            evaluation_df=pd.read_csv(evaluation_path)
-            st.subheader("Evaluation Results")
-            st.dataframe(evaluation_df,use_container_width=True)
-            numeric_columns=evaluation_df.select_dtypes(include=np.number).columns.tolist()
-            if numeric_columns:
+            df=pd.read_csv(uploaded)
+            st.subheader("Evaluation Metrics")
+            st.dataframe(df,use_container_width=True)
+            numeric=df.select_dtypes(include=np.number)
+            if not numeric.empty:
                 st.subheader("Metric Visualization")
-                st.bar_chart(evaluation_df.set_index(evaluation_df.columns[0])[numeric_columns])
+                st.bar_chart(numeric)
         except Exception as e:
-            st.error(f"Could not read evaluation.csv: {e}")
+            st.error(f"Could not read the CSV file: {e}")
     else:
-        st.warning("evaluation.csv was not found.")
-        st.write("Add an evaluation.csv file containing the metrics calculated from your test dataset.")
-
+        st.info("No evaluation file uploaded. This page will display metrics only when you provide test results.")
+```
